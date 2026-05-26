@@ -15,22 +15,40 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+// restoreCmd is the top-level "restore" group.
 var restoreCmd = &cobra.Command{
-	Use:          "restore <config> [job-name]",
-	Short:        "Restore a database from a backup",
-	SilenceUsage: true,
-	Args:         cobra.RangeArgs(1, 2),
-	RunE:         runRestore,
+	Use:   "restore",
+	Short: "Restore databases from backups",
 }
 
-var flagRestoreKubeconfig string
-func init() {
+func newRestoreNameCmd(cfgName string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   cfgName,
+		Short: fmt.Sprintf("Restore commands for config %q", cfgName),
+	}
+
+	runCmd := &cobra.Command{
+		Use:          "run [job-name]",
+		Short:        "Restore a database from a backup",
+		SilenceUsage: true,
+		RunE: func(c *cobra.Command, args []string) error {
+			kubeconfig, _ := c.Flags().GetString("kubeconfig")
+			jobName := ""
+			if len(args) > 0 {
+				jobName = args[0]
+			}
+			return runRestoreRun(cfgName, jobName, kubeconfig)
+		},
+	}
 	home, _ := os.UserHomeDir()
-	restoreCmd.Flags().StringVar(&flagRestoreKubeconfig, "kubeconfig", filepath.Join(home, ".kube", "config"), "path to kubeconfig file")
+	runCmd.Flags().String("kubeconfig", filepath.Join(home, ".kube", "config"), "path to kubeconfig file")
+
+	cmd.AddCommand(runCmd)
+	return cmd
 }
 
-func runRestore(cmd *cobra.Command, args []string) error {
-	cfgPath, err := config.NamedPath(args[0])
+func runRestoreRun(cfgName, jobName, kubeconfig string) error {
+	cfgPath, err := config.NamedPath(cfgName)
 	if err != nil {
 		return err
 	}
@@ -38,53 +56,68 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(cfg.Jobs) == 0 {
+		return fmt.Errorf("config %q has no jobs", cfgName)
+	}
 
-	// Find the job — prompt if not specified
-	var job *config.JobConfig
-	if len(args) == 2 {
-		for i := range cfg.Jobs {
-			if cfg.Jobs[i].Name == args[1] {
-				job = &cfg.Jobs[i]
+	// Determine which jobs to restore
+	var jobs []config.JobConfig
+	if jobName != "" {
+		for _, j := range cfg.Jobs {
+			if j.Name == jobName {
+				jobs = append(jobs, j)
 				break
 			}
 		}
-		if job == nil {
-			return fmt.Errorf("job %q not found in config %q", args[1], args[0])
+		if len(jobs) == 0 {
+			return fmt.Errorf("job %q not found in config %q", jobName, cfgName)
 		}
 	} else {
-		selectedName, err := runSingleJobSelector(cfg.Jobs)
+		// Multi-select
+		selected, err := runJobSelector(cfg.Jobs)
 		if err != nil {
 			return err
 		}
-		if selectedName == "" {
-			fmt.Println("No job selected.")
+		if len(selected) == 0 {
+			fmt.Println("No jobs selected.")
 			return nil
 		}
-		for i := range cfg.Jobs {
-			if cfg.Jobs[i].Name == selectedName {
-				job = &cfg.Jobs[i]
-				break
+		selectedSet := make(map[string]bool)
+		for _, n := range selected {
+			selectedSet[n] = true
+		}
+		for _, j := range cfg.Jobs {
+			if selectedSet[j.Name] {
+				jobs = append(jobs, j)
 			}
 		}
 	}
-	if len(job.Destinations) == 0 {
-		return fmt.Errorf("job %q has no destinations", args[1])
-	}
 
-	// Use first destination
+	// Restore each selected job
+	for _, job := range jobs {
+		if err := restoreJob(job, cfgName, kubeconfig); err != nil {
+			fmt.Printf("%s  %s: %v\n", styleErr.Render("✗"), job.Name, err)
+		}
+	}
+	return nil
+}
+
+func restoreJob(job config.JobConfig, cfgName, kubeconfig string) error {
+	if len(job.Destinations) == 0 {
+		return fmt.Errorf("no destinations configured")
+	}
 	dest := job.Destinations[0]
 
-	// Read S3 credentials from K8s secret
-	accessKey, err := k8s.ReadSecret(flagRestoreKubeconfig, dest.S3AccessKey.From)
+	accessKey, err := k8s.ReadSecret(kubeconfig, dest.S3AccessKey.From)
 	if err != nil {
 		return fmt.Errorf("reading S3 access key: %w", err)
 	}
-	secretKey, err := k8s.ReadSecret(flagRestoreKubeconfig, dest.S3SecretKey.From)
+	secretKey, err := k8s.ReadSecret(kubeconfig, dest.S3SecretKey.From)
 	if err != nil {
 		return fmt.Errorf("reading S3 secret key: %w", err)
 	}
 
-	fmt.Printf("Listing backups in s3://%s/%s...\n\n", dest.Bucket, dest.Prefix)
+	fmt.Printf("\nListing backups for %s (s3://%s/%s)...\n\n", job.Name, dest.Bucket, dest.Prefix)
 	objects, err := storage.ListBackups(dest.Bucket, dest.Prefix, accessKey, secretKey, dest.Region, dest.Endpoint)
 	if err != nil {
 		return fmt.Errorf("listing backups: %w", err)
@@ -93,33 +126,32 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no backups found in s3://%s/%s", dest.Bucket, dest.Prefix)
 	}
 
-	// Interactive selector
-	selected, err := runBackupSelector(objects)
+	selectedKey, err := runBackupSelector(objects)
 	if err != nil {
 		return err
 	}
-	if selected == "" {
-		fmt.Println("No backup selected.")
+	if selectedKey == "" {
+		fmt.Println("  Skipped.")
 		return nil
 	}
 
-	s3URL := fmt.Sprintf("s3://%s/%s", dest.Bucket, selected)
-	fmt.Printf("\nRestoring %s into job %q...\n\n", s3URL, job.Name)
-	fmt.Println(styleErr.Render("  ⚠  This will overwrite the current database. Continue? [y/N] "))
+	s3URL := fmt.Sprintf("s3://%s/%s", dest.Bucket, selectedKey)
+	fmt.Printf("\nRestoring %s into %q...\n", s3URL, job.Name)
+	fmt.Print(styleErr.Render("  ⚠  This will overwrite the current database. Continue? [y/N] "))
 	var ans string
 	fmt.Scanln(&ans)
 	if strings.ToLower(ans) != "y" {
-		fmt.Println("Aborted.")
+		fmt.Println("  Skipped.")
 		return nil
 	}
 
-	k8sJob, err := k8s.TriggerRestore(flagRestoreKubeconfig, *job, s3URL, 0)
+	k8sJob, err := k8s.TriggerRestore(kubeconfig, job, s3URL, 0)
 	if err != nil {
 		return fmt.Errorf("triggering restore: %w", err)
 	}
 	fmt.Printf("  %s  Restore job started: job/%s\n\n", styleOK.Render("▶"), k8sJob.Name)
 
-	k8scfg, err := clientcmd.BuildConfigFromFlags("", flagRestoreKubeconfig)
+	k8scfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		return err
 	}
@@ -138,63 +170,6 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s  Restore %s\n", styleErr.Render("✗"), status)
 	}
 	return nil
-}
-
-// singleJobSelectorModel lets the user pick one job from a list.
-type singleJobSelectorModel struct {
-	jobs   []string
-	cursor int
-	chosen string
-}
-
-func (m singleJobSelectorModel) Init() tea.Cmd { return nil }
-
-func (m singleJobSelectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c", "q":
-			return m, tea.Quit
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-		case "down", "j":
-			if m.cursor < len(m.jobs)-1 {
-				m.cursor++
-			}
-		case "enter":
-			m.chosen = m.jobs[m.cursor]
-			return m, tea.Quit
-		}
-	}
-	return m, nil
-}
-
-func (m singleJobSelectorModel) View() string {
-	var b strings.Builder
-	b.WriteString("Select a job to restore:\n")
-	b.WriteString(styleSubtext.Render("  ↑/↓ navigate   enter confirm   q cancel") + "\n\n")
-	for i, name := range m.jobs {
-		cursor := "  "
-		if i == m.cursor {
-			cursor = styleCursor.Render("> ")
-		}
-		b.WriteString(fmt.Sprintf("%s%s\n", cursor, name))
-	}
-	return b.String()
-}
-
-func runSingleJobSelector(jobs []config.JobConfig) (string, error) {
-	names := make([]string, len(jobs))
-	for i, j := range jobs {
-		names[i] = j.Name
-	}
-	result, err := tea.NewProgram(singleJobSelectorModel{jobs: names}).Run()
-	if err != nil {
-		return "", err
-	}
-	return result.(singleJobSelectorModel).chosen, nil
 }
 
 // backupSelectorModel lets the user pick one backup from a list.
@@ -237,39 +212,37 @@ func (m backupSelectorModel) View() string {
 		if i == m.cursor {
 			cursor = styleCursor.Render("> ")
 		}
-		// Show just the filename + date + size
 		parts := strings.Split(obj.Key, "/")
 		filename := parts[len(parts)-1]
-		size := formatSize(obj.Size)
-		line := fmt.Sprintf("%-40s  %s  %s", filename, obj.LastModified, size)
+		line := fmt.Sprintf("%-40s  %s  %s", filename, obj.LastModified, formatSize(obj.Size))
 		b.WriteString(fmt.Sprintf("%s%s\n", cursor, line))
 	}
 	return b.String()
 }
 
 func runBackupSelector(objects []storage.BackupObject) (string, error) {
-	// Show most recent first
+	// Most recent first
 	reversed := make([]storage.BackupObject, len(objects))
 	for i, o := range objects {
 		reversed[len(objects)-1-i] = o
 	}
-	m := backupSelectorModel{items: reversed}
-	result, err := tea.NewProgram(m).Run()
+	result, err := tea.NewProgram(backupSelectorModel{items: reversed}).Run()
 	if err != nil {
 		return "", err
 	}
 	return result.(backupSelectorModel).chosen, nil
 }
 
-func formatSize(bytes int64) string {
-	switch {
-	case bytes >= 1<<30:
-		return fmt.Sprintf("%.1f GB", float64(bytes)/(1<<30))
-	case bytes >= 1<<20:
-		return fmt.Sprintf("%.1f MB", float64(bytes)/(1<<20))
-	case bytes >= 1<<10:
-		return fmt.Sprintf("%.1f KB", float64(bytes)/(1<<10))
-	default:
-		return fmt.Sprintf("%d B", bytes)
+func init() {
+	// Register known configs as sub-groups at startup
+	if dir, err := config.ConfigDir(); err == nil {
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, e := range entries {
+				if !e.IsDir() && strings.HasSuffix(e.Name(), ".yaml") {
+					n := strings.TrimSuffix(e.Name(), ".yaml")
+					restoreCmd.AddCommand(newRestoreNameCmd(n))
+				}
+			}
+		}
 	}
 }

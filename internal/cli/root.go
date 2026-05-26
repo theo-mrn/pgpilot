@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/theomorin/dbpilot/internal/k8s"
 )
 
 var version = "dev"
@@ -25,13 +26,18 @@ func Execute() {
 	}
 }
 
+// k8sReadSecretInternal is used by backup.go to read S3 credentials from K8s.
+func k8sReadSecretInternal(kubeconfig, ref string) (string, error) {
+	return k8s.ReadSecret(kubeconfig, ref)
+}
+
 func init() {
 	rootCmd.AddCommand(configCmd)
-	rootCmd.AddCommand(deployCmd)
+	rootCmd.AddCommand(backupCmd)
 	rootCmd.AddCommand(restoreCmd)
+	rootCmd.AddCommand(deployCmd)
 	rootCmd.AddCommand(validateCmd)
 	rootCmd.AddCommand(statusCmd)
-	rootCmd.AddCommand(backupCmd)
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "version",
 		Short: "Print version",

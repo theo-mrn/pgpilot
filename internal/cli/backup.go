@@ -5,9 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
-
 	"strings"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -17,29 +16,63 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/theomorin/dbpilot/internal/config"
+	"github.com/theomorin/dbpilot/internal/storage"
 )
 
+// backupCmd is the top-level "backup" group.
 var backupCmd = &cobra.Command{
-	Use:          "backup <config> [job-name]",
-	Short:        "Trigger a backup now for one or all jobs in a config",
-	SilenceUsage: true,
-	Args:         cobra.RangeArgs(1, 2),
-	RunE:         runBackup,
+	Use:   "backup",
+	Short: "Manage and trigger backups",
 }
 
-var flagBackupKubeconfig string
-var flagBackupWait bool
-var flagBackupDryRun bool
+func newBackupNameCmd(cfgName string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   cfgName,
+		Short: fmt.Sprintf("Backup commands for config %q", cfgName),
+	}
 
-func init() {
+	runCmd := &cobra.Command{
+		Use:          "run [job-name]",
+		Short:        "Trigger a backup now",
+		SilenceUsage: true,
+		RunE: func(c *cobra.Command, args []string) error {
+			noWait, _ := c.Flags().GetBool("no-wait")
+			dryRun, _ := c.Flags().GetBool("dry-run")
+			kubeconfig, _ := c.Flags().GetString("kubeconfig")
+			jobName := ""
+			if len(args) > 0 {
+				jobName = args[0]
+			}
+			return runBackupRun(cfgName, jobName, kubeconfig, noWait, dryRun)
+		},
+	}
 	home, _ := os.UserHomeDir()
-	backupCmd.Flags().StringVar(&flagBackupKubeconfig, "kubeconfig", filepath.Join(home, ".kube", "config"), "path to kubeconfig file")
-	backupCmd.Flags().BoolVarP(&flagBackupWait, "no-wait", "n", false, "return immediately without waiting for completion")
-	backupCmd.Flags().BoolVar(&flagBackupDryRun, "dry-run", false, "show what would be triggered without running")
+	runCmd.Flags().String("kubeconfig", filepath.Join(home, ".kube", "config"), "path to kubeconfig file")
+	runCmd.Flags().Bool("no-wait", false, "return immediately without waiting for completion")
+	runCmd.Flags().Bool("dry-run", false, "show what would be triggered without running")
+
+	listCmd := &cobra.Command{
+		Use:          "list [job-name]",
+		Short:        "List available backups in S3",
+		SilenceUsage: true,
+		RunE: func(c *cobra.Command, args []string) error {
+			jobName := ""
+			if len(args) > 0 {
+				jobName = args[0]
+			}
+			kubeconfig, _ := c.Flags().GetString("kubeconfig")
+			return runBackupList(cfgName, jobName, kubeconfig)
+		},
+	}
+	listCmd.Flags().String("kubeconfig", filepath.Join(home, ".kube", "config"), "path to kubeconfig file")
+
+	cmd.AddCommand(runCmd)
+	cmd.AddCommand(listCmd)
+	return cmd
 }
 
-func runBackup(cmd *cobra.Command, args []string) error {
-	cfgPath, err := config.NamedPath(args[0])
+func runBackupRun(cfgName, jobName, kubeconfig string, noWait, dryRun bool) error {
+	cfgPath, err := config.NamedPath(cfgName)
 	if err != nil {
 		return err
 	}
@@ -47,11 +80,8 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(cfg.Jobs) == 0 {
-		return fmt.Errorf("config %q has no jobs", args[0])
-	}
 
-	k8scfg, err := clientcmd.BuildConfigFromFlags("", flagBackupKubeconfig)
+	k8scfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		return err
 	}
@@ -60,45 +90,41 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Determine which jobs to trigger
 	var jobNames []string
-	if len(args) == 2 {
-		jobNames = []string{args[1]}
+	if jobName != "" {
+		jobNames = []string{jobName}
 	} else {
 		for _, j := range cfg.Jobs {
 			jobNames = append(jobNames, j.Name)
 		}
 	}
 
-	// Find matching CronJobs in K8s
 	var targets []batchv1.CronJob
-	for _, jobName := range jobNames {
-		cronName := "dbpilot-" + jobName
-		// Find the job config to get its namespace
+	for _, name := range jobNames {
+		cronName := "dbpilot-" + name
 		var ns string
 		for _, j := range cfg.Jobs {
-			if j.Name == jobName {
+			if j.Name == name {
 				ns = j.Environment.Namespace
 				break
 			}
 		}
 		if ns == "" {
-			fmt.Printf("  %s  %s: not found in config\n", styleErr.Render("✗"), jobName)
+			fmt.Printf("  %s  %s: not found in config\n", styleErr.Render("✗"), name)
 			continue
 		}
 		cj, err := client.BatchV1().CronJobs(ns).Get(context.Background(), cronName, metav1.GetOptions{})
 		if err != nil {
-			fmt.Printf("  %s  %s: CronJob not found — run 'dbpilot deploy %s' first\n", styleErr.Render("✗"), jobName, args[0])
+			fmt.Printf("  %s  %s: CronJob not found — run 'dbpilot deploy %s' first\n", styleErr.Render("✗"), name, cfgName)
 			continue
 		}
 		targets = append(targets, *cj)
 	}
-
 	if len(targets) == 0 {
 		return fmt.Errorf("no jobs to trigger")
 	}
 
-	if flagBackupDryRun {
+	if dryRun {
 		fmt.Println("Dry run — no jobs will be created.\n")
 		for _, cj := range targets {
 			ts := time.Now().Format("20060102-150405")
@@ -107,7 +133,7 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Collect unique bucket names
+	// Collect unique buckets for display
 	buckets := make(map[string]bool)
 	for _, j := range cfg.Jobs {
 		for _, d := range j.Destinations {
@@ -120,7 +146,7 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	for b := range buckets {
 		bucketList = append(bucketList, b)
 	}
-	fmt.Printf("Backing up %d database(s) from config %q → s3://%s\n\n", len(targets), args[0], strings.Join(bucketList, ", s3://"))
+	fmt.Printf("Backing up %d database(s) from config %q → s3://%s\n\n", len(targets), cfgName, strings.Join(bucketList, ", s3://"))
 
 	var triggered []triggeredJob
 	for _, cj := range targets {
@@ -133,7 +159,7 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %s  %s  →  job/%s\n", styleOK.Render("▶"), cj.Name, job.Name)
 	}
 
-	if flagBackupWait || len(triggered) == 0 {
+	if noWait || len(triggered) == 0 {
 		return nil
 	}
 
@@ -152,6 +178,53 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return nil
+}
+
+func runBackupList(cfgName, jobName, kubeconfig string) error {
+	cfgPath, err := config.NamedPath(cfgName)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+
+	for _, job := range cfg.Jobs {
+		if jobName != "" && job.Name != jobName {
+			continue
+		}
+		if len(job.Destinations) == 0 {
+			continue
+		}
+		dest := job.Destinations[0]
+		accessKey, err := k8sReadSecret(kubeconfig, dest.S3AccessKey.From)
+		if err != nil {
+			fmt.Printf("  %s  %s: %v\n", styleErr.Render("✗"), job.Name, err)
+			continue
+		}
+		secretKey, err := k8sReadSecret(kubeconfig, dest.S3SecretKey.From)
+		if err != nil {
+			fmt.Printf("  %s  %s: %v\n", styleErr.Render("✗"), job.Name, err)
+			continue
+		}
+		objects, err := storage.ListBackups(dest.Bucket, dest.Prefix, accessKey, secretKey, dest.Region, dest.Endpoint)
+		if err != nil {
+			fmt.Printf("  %s  %s: %v\n", styleErr.Render("✗"), job.Name, err)
+			continue
+		}
+		fmt.Printf("\n%s — s3://%s/%s (%d backup(s))\n", job.Name, dest.Bucket, dest.Prefix, len(objects))
+		for i := len(objects) - 1; i >= 0; i-- {
+			o := objects[i]
+			parts := strings.Split(o.Key, "/")
+			fmt.Printf("  %s  %s  %s\n", styleSubtext.Render(o.LastModified), parts[len(parts)-1], formatSize(o.Size))
+		}
+	}
+	return nil
+}
+
+func k8sReadSecret(kubeconfig, ref string) (string, error) {
+	return k8sReadSecretInternal(kubeconfig, ref)
 }
 
 type triggeredJob struct {
@@ -191,7 +264,6 @@ func triggerNow(client kubernetes.Interface, cj batchv1.CronJob) (*batchv1.Job, 
 		},
 		Spec: cj.Spec.JobTemplate.Spec,
 	}
-
 	return client.BatchV1().Jobs(cj.Namespace).Create(context.Background(), job, metav1.CreateOptions{})
 }
 
@@ -204,14 +276,12 @@ func waitForJobWithLogs(client kubernetes.Interface, job *batchv1.Job, timeout t
 		if err != nil {
 			return "", err
 		}
-
 		if j.Status.Succeeded > 0 {
 			pods, _ := client.CoreV1().Pods(job.Namespace).List(context.Background(), metav1.ListOptions{
 				LabelSelector: fmt.Sprintf("batch.kubernetes.io/job-name=%s", job.Name),
 			})
 			for _, pod := range pods.Items {
-				logs := getPodLogs(client, pod.Namespace, pod.Name)
-				if logs != "" {
+				if logs := getPodLogs(client, pod.Namespace, pod.Name); logs != "" {
 					fmt.Printf("  pod/%s:\n\n%s\n", pod.Name, logs)
 				}
 			}
@@ -222,8 +292,7 @@ func waitForJobWithLogs(client kubernetes.Interface, job *batchv1.Job, timeout t
 				LabelSelector: fmt.Sprintf("batch.kubernetes.io/job-name=%s", job.Name),
 			})
 			for _, pod := range pods.Items {
-				logs := getPodLogs(client, pod.Namespace, pod.Name)
-				if logs != "" {
+				if logs := getPodLogs(client, pod.Namespace, pod.Name); logs != "" {
 					fmt.Printf("  pod/%s:\n\n%s\n", pod.Name, logs)
 				}
 			}
@@ -235,14 +304,12 @@ func waitForJobWithLogs(client kubernetes.Interface, job *batchv1.Job, timeout t
 		})
 		for _, pod := range pods.Items {
 			if pod.Status.Phase == "Pending" && !reportedPending[pod.Name] {
-				reason := pendingReason(pod)
-				if reason != "waiting for scheduler" {
+				if reason := pendingReason(pod); reason != "waiting for scheduler" {
 					fmt.Printf("  pod/%s — %s\n", pod.Name, reason)
 					reportedPending[pod.Name] = true
 				}
 			}
 		}
-
 		time.Sleep(3 * time.Second)
 	}
 	return "timeout", nil
@@ -272,4 +339,31 @@ func getPodLogs(client kubernetes.Interface, namespace, podName string) string {
 		return ""
 	}
 	return string(data)
+}
+
+func formatSize(bytes int64) string {
+	switch {
+	case bytes >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(bytes)/(1<<30))
+	case bytes >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/(1<<20))
+	case bytes >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
+}
+
+func init() {
+	// Register known configs as sub-groups at startup
+	if dir, err := config.ConfigDir(); err == nil {
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, e := range entries {
+				if !e.IsDir() && strings.HasSuffix(e.Name(), ".yaml") {
+					n := strings.TrimSuffix(e.Name(), ".yaml")
+					backupCmd.AddCommand(newBackupNameCmd(n))
+				}
+			}
+		}
+	}
 }
