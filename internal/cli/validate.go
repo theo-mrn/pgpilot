@@ -12,23 +12,22 @@ var styleOK = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
 var styleErr = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
 
 var validateCmd = &cobra.Command{
-	Use:          "validate",
-	Short:        "Validate backup.yaml configuration",
+	Use:          "validate <name>",
+	Short:        "Validate a backup configuration",
 	SilenceUsage: true,
+	Args:         cobra.ExactArgs(1),
 	RunE:         runValidate,
 }
 
-var flagValidatePath string
-
-func init() {
-	defaultPath, _ := config.DefaultPath()
-	validateCmd.Flags().StringVarP(&flagValidatePath, "config", "c", defaultPath, "path to backup.yaml")
-}
-
 func runValidate(cmd *cobra.Command, args []string) error {
-	fmt.Printf("Validating %s...\n\n", flagValidatePath)
+	path, err := config.NamedPath(args[0])
+	if err != nil {
+		return err
+	}
 
-	cfg, err := config.Load(flagValidatePath)
+	fmt.Printf("Validating config %q...\n\n", args[0])
+
+	cfg, err := config.Load(path)
 	if err != nil {
 		fmt.Println(styleErr.Render("✗ " + err.Error()))
 		return err

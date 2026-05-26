@@ -18,8 +18,9 @@ import (
 )
 
 var statusCmd = &cobra.Command{
-	Use:          "status",
+	Use:          "status [name]",
 	Short:        "Show status of deployed backup CronJobs",
+	Long:         "Show status of all deployed CronJobs, or only those from a specific config if <name> is given.",
 	SilenceUsage: true,
 	RunE:         runStatus,
 }

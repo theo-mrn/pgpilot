@@ -81,7 +81,16 @@ func StoreS3Credentials(kubeconfig, accessKey, secretKey string) error {
 	return storeS3CredentialsInNamespace(kubeconfig, "dbpilot", accessKey, secretKey)
 }
 
+// StoreS3CredentialsNamed creates or updates a Secret with the given name in the dbpilot namespace.
+func StoreS3CredentialsNamed(kubeconfig, secretName, accessKey, secretKey string) error {
+	return storeS3CredentialsNamed(kubeconfig, "dbpilot", secretName, accessKey, secretKey)
+}
+
 func storeS3CredentialsInNamespace(kubeconfig, namespace, accessKey, secretKey string) error {
+	return storeS3CredentialsNamed(kubeconfig, namespace, S3SecretName, accessKey, secretKey)
+}
+
+func storeS3CredentialsNamed(kubeconfig, namespace, secretName, accessKey, secretKey string) error {
 	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		return err
@@ -93,7 +102,7 @@ func storeS3CredentialsInNamespace(kubeconfig, namespace, accessKey, secretKey s
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      S3SecretName,
+			Name:      secretName,
 			Namespace: namespace,
 			Labels:    map[string]string{"app.kubernetes.io/managed-by": "dbpilot"},
 		},
@@ -108,6 +117,43 @@ func storeS3CredentialsInNamespace(kubeconfig, namespace, accessKey, secretKey s
 		_, err = client.CoreV1().Secrets(namespace).Update(context.Background(), secret, metav1.UpdateOptions{})
 	}
 	return err
+}
+
+// ReadSecret reads a key from a K8s secret using a k8s-secret:// ref string.
+func ReadSecret(kubeconfig, ref string) (string, error) {
+	// ref format: k8s-secret://namespace/name#key
+	ref = stripPrefix(ref, "k8s-secret://")
+	hashIdx := indexOf(ref, '#')
+	key := ""
+	if hashIdx >= 0 {
+		key = ref[hashIdx+1:]
+		ref = ref[:hashIdx]
+	}
+	slashIdx := indexOf(ref, '/')
+	namespace := "default"
+	name := ref
+	if slashIdx >= 0 {
+		namespace = ref[:slashIdx]
+		name = ref[slashIdx+1:]
+	}
+
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		return "", err
+	}
+	client, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return "", err
+	}
+	secret, err := client.CoreV1().Secrets(namespace).Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("reading secret %s/%s: %w", namespace, name, err)
+	}
+	val, ok := secret.Data[key]
+	if !ok {
+		return "", fmt.Errorf("key %q not found in secret %s/%s", key, namespace, name)
+	}
+	return string(val), nil
 }
 
 // StoreAgePrivateKey stores the age private key in a Secret in the dbpilot namespace.

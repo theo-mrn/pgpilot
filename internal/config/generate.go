@@ -13,7 +13,7 @@ import (
 
 // Generate builds a BackupConfig from the selected instances using sensible defaults.
 // agePublicKey is embedded in each job's credentials when non-empty.
-func Generate(instances []detect.DetectedInstance, agePublicKey string, dest DestinationConfig) BackupConfig {
+func Generate(instances []detect.DetectedInstance, agePublicKey string, dest DestinationConfig, s3AccessKey, s3SecretKey string) BackupConfig {
 	cfg := BackupConfig{
 		Global: GlobalConfig{
 			VerifyRestore: false,
@@ -34,17 +34,21 @@ func Generate(instances []detect.DetectedInstance, agePublicKey string, dest Des
 				Type:      string(inst.Environment),
 				Namespace: inst.Namespace,
 			},
-			Destination: DestinationConfig{
-				Type:     dest.Type,
-				Bucket:   dest.Bucket,
-				Endpoint: dest.Endpoint,
-				Prefix:   fmt.Sprintf("%s/%s", inst.Namespace, jobName(inst)),
+			Destinations: []DestinationConfig{
+				{
+					Name:        "primary",
+					Type:        dest.Type,
+					Bucket:      dest.Bucket,
+					Endpoint:    dest.Endpoint,
+					Region:      dest.Region,
+					Prefix:      fmt.Sprintf("%s/%s", inst.Namespace, jobName(inst)),
+					S3AccessKey: SecretRef{From: s3AccessKey},
+					S3SecretKey: SecretRef{From: s3SecretKey},
+				},
 			},
 			Credentials: CredentialsConfig{
 				DBPassword:   SecretRef{From: fmt.Sprintf("k8s-secret://%s/dbpilot-credentials#db_password", inst.Namespace)},
-				DBHost:       jobName(inst), // K8s service name derived from pod name
-				S3AccessKey:  SecretRef{From: "k8s-secret://dbpilot/s3-credentials#access_key"},
-				S3SecretKey:  SecretRef{From: "k8s-secret://dbpilot/s3-credentials#secret_key"},
+				DBHost:       jobName(inst),
 				AgePublicKey: agePublicKey,
 			},
 		}
@@ -54,8 +58,8 @@ func Generate(instances []detect.DetectedInstance, agePublicKey string, dest Des
 	return cfg
 }
 
-// DefaultPath returns ~/.config/dbpilot/backup.yaml, creating the directory if needed.
-func DefaultPath() (string, error) {
+// ConfigDir returns ~/.config/dbpilot, creating it if needed.
+func ConfigDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolving home dir: %w", err)
@@ -64,7 +68,21 @@ func DefaultPath() (string, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("creating config dir: %w", err)
 	}
-	return filepath.Join(dir, "backup.yaml"), nil
+	return dir, nil
+}
+
+// NamedPath returns ~/.config/dbpilot/<name>.yaml, creating the directory if needed.
+func NamedPath(name string) (string, error) {
+	dir, err := ConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, name+".yaml"), nil
+}
+
+// DefaultPath returns ~/.config/dbpilot/backup.yaml, kept for backward compatibility.
+func DefaultPath() (string, error) {
+	return NamedPath("backup")
 }
 
 // Write serializes cfg to path. Errors if the file already exists unless force is true.

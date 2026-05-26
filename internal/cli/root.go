@@ -13,9 +13,9 @@ func SetVersion(v string) { version = v }
 
 var rootCmd = &cobra.Command{
 	Use:   "dbpilot",
-	Short: "Database backup orchestrator for heterogeneous environments",
-	Long: `dbpilot automates database backups across Kubernetes, Docker, and systemd environments.
-It uses WAL-G as its primary backup engine and supports PostgreSQL, MySQL, and MongoDB.`,
+	Short: "PostgreSQL backup orchestrator for Kubernetes",
+	Long: `dbpilot automates PostgreSQL backups to S3-compatible storage via Kubernetes CronJobs.
+Zero infrastructure changes — no sidecars, no pod mutations, no GitOps conflicts.`,
 }
 
 func Execute() {
@@ -26,9 +26,10 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.AddCommand(detectCmd)
-	rootCmd.AddCommand(validateCmd)
+	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(deployCmd)
+	rootCmd.AddCommand(restoreCmd)
+	rootCmd.AddCommand(validateCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(backupCmd)
 	rootCmd.AddCommand(&cobra.Command{

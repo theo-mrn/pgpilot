@@ -117,16 +117,7 @@ func buildCronJob(job config.JobConfig) *batchv1.CronJob {
 	successfulJobsLimit := int32(3)
 	failedJobsLimit := int32(3)
 
-	envVars := buildEnvVars(job)
-
-	// pg_dump streams a compressed SQL dump directly to S3 via aws s3 cp.
-	// No modification to the Postgres pod or config required.
-	s3Key := fmt.Sprintf("s3://%s/%s/$(date -u +%%Y%%m%%dT%%H%%M%%SZ).dump.gz", job.Destination.Bucket, job.Destination.Prefix)
-	script := fmt.Sprintf(`set -e
-pg_dump --no-password -Fc | aws s3 cp - %s`, s3Key)
-	if job.Destination.Endpoint != "" {
-		script += fmt.Sprintf(" --endpoint-url %s", job.Destination.Endpoint)
-	}
+	envVars, script := buildEnvVarsAndScript(job)
 
 	restartPolicy := corev1.RestartPolicyOnFailure
 
@@ -165,26 +156,14 @@ pg_dump --no-password -Fc | aws s3 cp - %s`, s3Key)
 	}
 }
 
-func buildEnvVars(job config.JobConfig) []corev1.EnvVar {
+// buildEnvVarsAndScript builds the env vars and shell script for a backup job.
+// Each destination gets its own AWS_* env vars (prefixed by index) and upload command.
+func buildEnvVarsAndScript(job config.JobConfig) ([]corev1.EnvVar, string) {
 	envVars := []corev1.EnvVar{
 		{
 			Name:      "PGPASSWORD",
 			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: parseSecretRef(job.Credentials.DBPassword.From)},
 		},
-		{
-			Name:      "AWS_ACCESS_KEY_ID",
-			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: parseSecretRef(job.Credentials.S3AccessKey.From)},
-		},
-		{
-			Name:      "AWS_SECRET_ACCESS_KEY",
-			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: parseSecretRef(job.Credentials.S3SecretKey.From)},
-		},
-	}
-	if job.Destination.Region != "" {
-		envVars = append(envVars, corev1.EnvVar{Name: "AWS_DEFAULT_REGION", Value: job.Destination.Region})
-	} else {
-		// aws cli requires a region even for MinIO
-		envVars = append(envVars, corev1.EnvVar{Name: "AWS_DEFAULT_REGION", Value: "us-east-1"})
 	}
 	if job.Credentials.DBHost != "" {
 		envVars = append(envVars, corev1.EnvVar{Name: "PGHOST", Value: job.Credentials.DBHost})
@@ -204,7 +183,45 @@ func buildEnvVars(job config.JobConfig) []corev1.EnvVar {
 			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: parseSecretRef(job.Credentials.DBName.From)},
 		})
 	}
-	return envVars
+
+	// Build per-destination env vars and upload commands.
+	// pg_dump writes to a temp file so we can upload to multiple destinations sequentially.
+	script := "set -e\nTMPFILE=$(mktemp)\ntrap 'rm -f $TMPFILE' EXIT\npg_dump --no-password -Fc > $TMPFILE\n"
+
+	for i, dest := range job.Destinations {
+		prefix := fmt.Sprintf("DEST%d_", i)
+		accessKeyVar := prefix + "AWS_ACCESS_KEY_ID"
+		secretKeyVar := prefix + "AWS_SECRET_ACCESS_KEY"
+		regionVar := prefix + "AWS_DEFAULT_REGION"
+
+		envVars = append(envVars,
+			corev1.EnvVar{
+				Name:      accessKeyVar,
+				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: parseSecretRef(dest.S3AccessKey.From)},
+			},
+			corev1.EnvVar{
+				Name:      secretKeyVar,
+				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: parseSecretRef(dest.S3SecretKey.From)},
+			},
+		)
+		region := dest.Region
+		if region == "" {
+			region = "us-east-1"
+		}
+		envVars = append(envVars, corev1.EnvVar{Name: regionVar, Value: region})
+
+		s3Key := fmt.Sprintf("s3://%s/%s/$(date -u +%%Y%%m%%dT%%H%%M%%SZ).dump.gz", dest.Bucket, dest.Prefix)
+		uploadCmd := fmt.Sprintf(
+			"AWS_ACCESS_KEY_ID=$%s AWS_SECRET_ACCESS_KEY=$%s AWS_DEFAULT_REGION=$%s aws s3 cp $TMPFILE %s",
+			accessKeyVar, secretKeyVar, regionVar, s3Key,
+		)
+		if dest.Endpoint != "" {
+			uploadCmd += fmt.Sprintf(" --endpoint-url %s", dest.Endpoint)
+		}
+		script += uploadCmd + "\n"
+	}
+
+	return envVars, script
 }
 
 // backupImageForJob returns the backup image tag for the job's Postgres version.

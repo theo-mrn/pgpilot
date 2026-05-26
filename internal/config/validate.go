@@ -91,11 +91,20 @@ func validateJob(job JobConfig, names map[string]bool) []ValidationError {
 		add("retention", "required")
 	}
 
-	if job.Destination.Type == "" {
-		add("destination.type", "required")
+	if len(job.Destinations) == 0 {
+		add("destinations", "at least one destination required")
 	}
-	if job.Destination.Bucket == "" {
-		add("destination.bucket", "required")
+	for i, dest := range job.Destinations {
+		p := fmt.Sprintf("destinations[%d]", i)
+		if dest.Bucket == "" {
+			add(p+".bucket", "required")
+		}
+		if dest.S3AccessKey.From == "" {
+			add(p+".s3_access_key.from", "required")
+		}
+		if dest.S3SecretKey.From == "" {
+			add(p+".s3_secret_key.from", "required")
+		}
 	}
 
 	if job.Encrypt {
@@ -108,12 +117,6 @@ func validateJob(job JobConfig, names map[string]bool) []ValidationError {
 
 	if job.Credentials.DBPassword.From == "" {
 		add("credentials.db_password.from", "required")
-	}
-	if job.Credentials.S3AccessKey.From == "" {
-		add("credentials.s3_access_key.from", "required")
-	}
-	if job.Credentials.S3SecretKey.From == "" {
-		add("credentials.s3_secret_key.from", "required")
 	}
 
 	return errs

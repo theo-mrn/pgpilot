@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"strings"
+
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,12 +16,14 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/spf13/cobra"
+	"github.com/theomorin/dbpilot/internal/config"
 )
 
 var backupCmd = &cobra.Command{
-	Use:          "backup [job-name]",
-	Short:        "Trigger a backup now for one or all jobs",
+	Use:          "backup <config> [job-name]",
+	Short:        "Trigger a backup now for one or all jobs in a config",
 	SilenceUsage: true,
+	Args:         cobra.RangeArgs(1, 2),
 	RunE:         runBackup,
 }
 
@@ -30,45 +34,68 @@ var flagBackupDryRun bool
 func init() {
 	home, _ := os.UserHomeDir()
 	backupCmd.Flags().StringVar(&flagBackupKubeconfig, "kubeconfig", filepath.Join(home, ".kube", "config"), "path to kubeconfig file")
-	backupCmd.Flags().BoolVarP(&flagBackupWait, "wait", "w", false, "wait for backup to complete and show result")
+	backupCmd.Flags().BoolVarP(&flagBackupWait, "no-wait", "n", false, "return immediately without waiting for completion")
 	backupCmd.Flags().BoolVar(&flagBackupDryRun, "dry-run", false, "show what would be triggered without running")
 }
 
 func runBackup(cmd *cobra.Command, args []string) error {
-	config, err := clientcmd.BuildConfigFromFlags("", flagBackupKubeconfig)
+	cfgPath, err := config.NamedPath(args[0])
 	if err != nil {
 		return err
 	}
-	client, err := kubernetes.NewForConfig(config)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+	if len(cfg.Jobs) == 0 {
+		return fmt.Errorf("config %q has no jobs", args[0])
+	}
+
+	k8scfg, err := clientcmd.BuildConfigFromFlags("", flagBackupKubeconfig)
+	if err != nil {
+		return err
+	}
+	client, err := kubernetes.NewForConfig(k8scfg)
 	if err != nil {
 		return err
 	}
 
-	cronjobs, err := client.BatchV1().CronJobs("").List(context.Background(), metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/managed-by=dbpilot",
-	})
-	if err != nil {
-		return fmt.Errorf("listing cronjobs: %w", err)
-	}
-	if len(cronjobs.Items) == 0 {
-		fmt.Println("No dbpilot CronJobs found. Run 'dbpilot deploy' first.")
-		return nil
+	// Determine which jobs to trigger
+	var jobNames []string
+	if len(args) == 2 {
+		jobNames = []string{args[1]}
+	} else {
+		for _, j := range cfg.Jobs {
+			jobNames = append(jobNames, j.Name)
+		}
 	}
 
-	// Filter by name if argument provided
+	// Find matching CronJobs in K8s
 	var targets []batchv1.CronJob
-	if len(args) > 0 {
-		needle := args[0]
-		for _, cj := range cronjobs.Items {
-			if cj.Name == needle || cj.Labels["dbpilot/job"] == needle {
-				targets = append(targets, cj)
+	for _, jobName := range jobNames {
+		cronName := "dbpilot-" + jobName
+		// Find the job config to get its namespace
+		var ns string
+		for _, j := range cfg.Jobs {
+			if j.Name == jobName {
+				ns = j.Environment.Namespace
+				break
 			}
 		}
-		if len(targets) == 0 {
-			return fmt.Errorf("no CronJob found matching %q", needle)
+		if ns == "" {
+			fmt.Printf("  %s  %s: not found in config\n", styleErr.Render("✗"), jobName)
+			continue
 		}
-	} else {
-		targets = cronjobs.Items
+		cj, err := client.BatchV1().CronJobs(ns).Get(context.Background(), cronName, metav1.GetOptions{})
+		if err != nil {
+			fmt.Printf("  %s  %s: CronJob not found — run 'dbpilot deploy %s' first\n", styleErr.Render("✗"), jobName, args[0])
+			continue
+		}
+		targets = append(targets, *cj)
+	}
+
+	if len(targets) == 0 {
+		return fmt.Errorf("no jobs to trigger")
 	}
 
 	if flagBackupDryRun {
@@ -79,6 +106,21 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		}
 		return nil
 	}
+
+	// Collect unique bucket names
+	buckets := make(map[string]bool)
+	for _, j := range cfg.Jobs {
+		for _, d := range j.Destinations {
+			if d.Bucket != "" {
+				buckets[d.Bucket] = true
+			}
+		}
+	}
+	bucketList := make([]string, 0, len(buckets))
+	for b := range buckets {
+		bucketList = append(bucketList, b)
+	}
+	fmt.Printf("Backing up %d database(s) from config %q → s3://%s\n\n", len(targets), args[0], strings.Join(bucketList, ", s3://"))
 
 	var triggered []triggeredJob
 	for _, cj := range targets {
@@ -91,7 +133,7 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %s  %s  →  job/%s\n", styleOK.Render("▶"), cj.Name, job.Name)
 	}
 
-	if !flagBackupWait || len(triggered) == 0 {
+	if flagBackupWait || len(triggered) == 0 {
 		return nil
 	}
 
@@ -121,9 +163,8 @@ type triggeredJob struct {
 func triggerNow(client kubernetes.Interface, cj batchv1.CronJob) (*batchv1.Job, error) {
 	ts := time.Now().Format("20060102-150405")
 	jobName := fmt.Sprintf("%s-manual-%s", cj.Name, ts)
-	// Truncate from the middle to keep timestamp suffix intact
 	if len(jobName) > 63 {
-		keep := 63 - len(ts) - 8 // "-manual-" = 8 chars
+		keep := 63 - len(ts) - 8
 		jobName = cj.Name[:keep] + "-manual-" + ts
 	}
 
@@ -165,7 +206,6 @@ func waitForJobWithLogs(client kubernetes.Interface, job *batchv1.Job, timeout t
 		}
 
 		if j.Status.Succeeded > 0 {
-			// Print logs from the completed pod
 			pods, _ := client.CoreV1().Pods(job.Namespace).List(context.Background(), metav1.ListOptions{
 				LabelSelector: fmt.Sprintf("batch.kubernetes.io/job-name=%s", job.Name),
 			})
@@ -190,7 +230,6 @@ func waitForJobWithLogs(client kubernetes.Interface, job *batchv1.Job, timeout t
 			return fmt.Sprintf("failed (%d attempt(s))", j.Status.Failed), nil
 		}
 
-		// Show pending reason while waiting
 		pods, _ := client.CoreV1().Pods(job.Namespace).List(context.Background(), metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("batch.kubernetes.io/job-name=%s", job.Name),
 		})
@@ -209,21 +248,17 @@ func waitForJobWithLogs(client kubernetes.Interface, job *batchv1.Job, timeout t
 	return "timeout", nil
 }
 
-// pendingReason returns a human-readable reason why a pod is still pending.
 func pendingReason(pod corev1.Pod) string {
-	// Check container statuses first
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.State.Waiting != nil {
 			return fmt.Sprintf("%s: %s", cs.State.Waiting.Reason, cs.State.Waiting.Message)
 		}
 	}
-	// Check pod conditions
 	for _, c := range pod.Status.Conditions {
 		if c.Status == "False" && c.Message != "" {
 			return c.Message
 		}
 	}
-	// Fallback to pod phase reason
 	if pod.Status.Reason != "" {
 		return pod.Status.Reason
 	}
