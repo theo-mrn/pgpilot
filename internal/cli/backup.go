@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	"github.com/theomorin/dbpilot/internal/config"
 	"github.com/theomorin/dbpilot/internal/storage"
@@ -27,9 +28,16 @@ var backupCmd = &cobra.Command{
 
 func newBackupNameCmd(cfgName string) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   cfgName,
-		Short: fmt.Sprintf("Backup commands for config %q", cfgName),
+		Use:          cfgName,
+		Short:        fmt.Sprintf("Backup commands for config %q", cfgName),
+		SilenceUsage: true,
+		RunE: func(c *cobra.Command, args []string) error {
+			kubeconfig, _ := c.Flags().GetString("kubeconfig")
+			return runBackupInteractive(cfgName, kubeconfig)
+		},
 	}
+	home, _ := os.UserHomeDir()
+	cmd.Flags().String("kubeconfig", filepath.Join(home, ".kube", "config"), "path to kubeconfig file")
 
 	runCmd := &cobra.Command{
 		Use:          "run [job-name]",
@@ -46,7 +54,6 @@ func newBackupNameCmd(cfgName string) *cobra.Command {
 			return runBackupRun(cfgName, jobName, kubeconfig, noWait, dryRun)
 		},
 	}
-	home, _ := os.UserHomeDir()
 	runCmd.Flags().String("kubeconfig", filepath.Join(home, ".kube", "config"), "path to kubeconfig file")
 	runCmd.Flags().Bool("no-wait", false, "return immediately without waiting for completion")
 	runCmd.Flags().Bool("dry-run", false, "show what would be triggered without running")
@@ -225,6 +232,97 @@ func runBackupList(cfgName, jobName, kubeconfig string) error {
 
 func k8sReadSecret(kubeconfig, ref string) (string, error) {
 	return k8sReadSecretInternal(kubeconfig, ref)
+}
+
+type actionSelectorModel struct {
+	options []string
+	cursor  int
+	chosen  string
+}
+
+func (m actionSelectorModel) Init() tea.Cmd { return nil }
+func (m actionSelectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "q":
+			return m, tea.Quit
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case "down", "j":
+			if m.cursor < len(m.options)-1 {
+				m.cursor++
+			}
+		case "enter":
+			m.chosen = m.options[m.cursor]
+			return m, tea.Quit
+		}
+	}
+	return m, nil
+}
+func (m actionSelectorModel) View() string {
+	var b strings.Builder
+	b.WriteString("What do you want to do?\n")
+	b.WriteString(styleSubtext.Render("  ↑/↓ navigate   enter confirm") + "\n\n")
+	for i, opt := range m.options {
+		cursor := "  "
+		if i == m.cursor {
+			cursor = styleCursor.Render("> ")
+		}
+		b.WriteString(fmt.Sprintf("%s%s\n", cursor, opt))
+	}
+	return b.String()
+}
+
+func runBackupInteractive(cfgName, kubeconfig string) error {
+	// 1. Choisir l'action
+	result, err := tea.NewProgram(actionSelectorModel{
+		options: []string{"Run backup now", "List backups in S3"},
+	}).Run()
+	if err != nil {
+		return err
+	}
+	chosen := result.(actionSelectorModel).chosen
+	if chosen == "" {
+		return nil
+	}
+
+	// 2. Charger la config et sélectionner les jobs
+	cfgPath, err := config.NamedPath(cfgName)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+	selectedJobs, err := runJobSelector(cfg.Jobs)
+	if err != nil {
+		return err
+	}
+	if len(selectedJobs) == 0 {
+		fmt.Println("No jobs selected.")
+		return nil
+	}
+
+	// 3. Exécuter l'action sur chaque job sélectionné
+	switch chosen {
+	case "Run backup now":
+		for _, jobName := range selectedJobs {
+			if err := runBackupRun(cfgName, jobName, kubeconfig, false, false); err != nil {
+				fmt.Printf("%s  %s: %v\n", styleErr.Render("✗"), jobName, err)
+			}
+		}
+	case "List backups in S3":
+		for _, jobName := range selectedJobs {
+			if err := runBackupList(cfgName, jobName, kubeconfig); err != nil {
+				fmt.Printf("%s  %s: %v\n", styleErr.Render("✗"), jobName, err)
+			}
+		}
+	}
+	return nil
 }
 
 type triggeredJob struct {

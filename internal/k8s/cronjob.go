@@ -186,7 +186,7 @@ func buildEnvVarsAndScript(job config.JobConfig) ([]corev1.EnvVar, string) {
 
 	// Build per-destination env vars and upload commands.
 	// pg_dump writes to a temp file so we can upload to multiple destinations sequentially.
-	script := "set -e\nTMPFILE=$(mktemp)\ntrap 'rm -f $TMPFILE' EXIT\npg_dump --no-password -Fc > $TMPFILE\n"
+	script := "set -e\nTMPFILE=$(mktemp)\ntrap 'rm -f $TMPFILE' EXIT\necho 'Dumping...'\npg_dump --no-password -Fc > $TMPFILE\necho 'Verifying dump integrity...'\npg_restore --list $TMPFILE > /dev/null\necho 'Dump verified.'\n"
 
 	for i, dest := range job.Destinations {
 		prefix := fmt.Sprintf("DEST%d_", i)
