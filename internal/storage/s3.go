@@ -5,36 +5,41 @@ import (
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-// CheckBucket verifies that the bucket exists and the credentials have access.
-// endpoint is empty for AWS S3, or the MinIO/compatible URL otherwise.
-// region is used for AWS S3; ignored for endpoint-based access.
+// CheckBucket verifies that the S3 bucket exists and is accessible.
 func CheckBucket(bucket, accessKey, secretKey, region, endpoint string) error {
-	creds := aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""))
-
 	if region == "" {
 		region = "us-east-1"
 	}
 
-	opts := s3.Options{
-		Credentials: creds,
-		Region:      region,
+	opts := []func(*awsconfig.LoadOptions) error{
+		awsconfig.WithRegion(region),
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")),
 	}
+
+	cfg, err := awsconfig.LoadDefaultConfig(context.Background(), opts...)
+	if err != nil {
+		return fmt.Errorf("configuring S3 client: %w", err)
+	}
+
+	var clientOpts []func(*s3.Options)
 	if endpoint != "" {
-		opts.BaseEndpoint = aws.String(endpoint)
-		opts.UsePathStyle = true
+		clientOpts = append(clientOpts, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(endpoint)
+			o.UsePathStyle = true
+		})
 	}
 
-	client := s3.New(opts)
-
-	_, err := client.HeadBucket(context.Background(), &s3.HeadBucketInput{
+	client := s3.NewFromConfig(cfg, clientOpts...)
+	_, err = client.HeadBucket(context.Background(), &s3.HeadBucketInput{
 		Bucket: aws.String(bucket),
 	})
 	if err != nil {
-		return fmt.Errorf("cannot access bucket %q: %w", bucket, err)
+		return fmt.Errorf("bucket %q not accessible: %w", bucket, err)
 	}
 	return nil
 }

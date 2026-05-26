@@ -10,6 +10,7 @@ import (
 	"github.com/theomorin/dbpilot/internal/k8s"
 )
 
+
 var deployCmd = &cobra.Command{
 	Use:          "deploy",
 	Short:        "Deploy backup CronJobs to Kubernetes from backup.yaml",
@@ -48,17 +49,6 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	if flagDryRun {
 		fmt.Println("Dry run — no changes will be applied.\n")
-	}
-
-	// Ensure s3-credentials is available in each job's namespace
-	namespaces := make(map[string]bool)
-	for _, job := range cfg.Jobs {
-		namespaces[job.Environment.Namespace] = true
-	}
-	for ns := range namespaces {
-		if err := k8s.CopySecretToNamespace(flagDeployKubeconfig, k8s.S3SecretName, ns); err != nil {
-			return fmt.Errorf("propagating s3-credentials to %s: %w", ns, err)
-		}
 	}
 
 	fmt.Printf("Deploying %d job(s)...\n\n", len(cfg.Jobs))

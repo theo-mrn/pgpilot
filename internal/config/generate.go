@@ -33,8 +33,6 @@ func Generate(instances []detect.DetectedInstance, agePublicKey string, dest Des
 			Environment: EnvironmentConfig{
 				Type:      string(inst.Environment),
 				Namespace: inst.Namespace,
-				Pod:       inst.PodName,
-				Container: inst.Container,
 			},
 			Destination: DestinationConfig{
 				Type:     dest.Type,

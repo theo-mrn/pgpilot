@@ -82,9 +82,6 @@ func validateJob(job JobConfig, names map[string]bool) []ValidationError {
 	if job.Environment.Namespace == "" {
 		add("environment.namespace", "required")
 	}
-	if job.Environment.Pod == "" {
-		add("environment.pod", "required")
-	}
 
 	if job.Schedule == "" {
 		add("schedule", "required")

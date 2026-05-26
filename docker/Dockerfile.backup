@@ -1,25 +1,5 @@
 ARG PG_VERSION=16
-ARG WALG_VERSION=v3.0.8
 
-FROM ubuntu:24.04
+FROM postgres:${PG_VERSION}-alpine
 
-ARG PG_VERSION
-ARG WALG_VERSION
-ARG TARGETARCH
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates \
-    && ARCH=$(dpkg --print-architecture) \
-    && curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/${ARCH}/kubectl" \
-       -o /usr/local/bin/kubectl \
-    && chmod +x /usr/local/bin/kubectl \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "amd64") && \
-    curl -fsSL \
-      "https://github.com/wal-g/wal-g/releases/download/${WALG_VERSION}/wal-g-pg-24.04-${ARCH}" \
-      -o /usr/local/bin/wal-g && \
-    chmod +x /usr/local/bin/wal-g && \
-    wal-g --version
-
-ENTRYPOINT ["/bin/sh"]
+RUN apk add --no-cache aws-cli

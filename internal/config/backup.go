@@ -27,8 +27,6 @@ type JobConfig struct {
 type EnvironmentConfig struct {
 	Type      string `yaml:"type"`
 	Namespace string `yaml:"namespace,omitempty"`
-	Pod       string `yaml:"pod,omitempty"`
-	Container string `yaml:"container,omitempty"`
 }
 
 type DestinationConfig struct {
@@ -43,7 +41,8 @@ type CredentialsConfig struct {
 	DBPassword   SecretRef `yaml:"db_password"`
 	DBUser       SecretRef `yaml:"db_user,omitempty"`
 	DBName       SecretRef `yaml:"db_name,omitempty"`
-	DBHost       string    `yaml:"db_host,omitempty"` // K8s service name, derived from pod name
+	DBHost       string    `yaml:"db_host,omitempty"`
+	DBPort       int       `yaml:"db_port,omitempty"` // defaults to 5432
 	S3AccessKey  SecretRef `yaml:"s3_access_key"`
 	S3SecretKey  SecretRef `yaml:"s3_secret_key"`
 	AgePublicKey string    `yaml:"age_public_key,omitempty"`
