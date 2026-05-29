@@ -368,8 +368,9 @@ func triggerNow(client kubernetes.Interface, cj batchv1.CronJob) (*batchv1.Job, 
 func waitForJobWithLogs(client kubernetes.Interface, job *batchv1.Job, timeout time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 	reportedPending := make(map[string]bool)
-	var spinner *Spinner
+	streamingPod := ""
 
+	var spinner *Spinner
 	stopSpinner := func() {
 		if spinner != nil {
 			spinner.Stop()
@@ -381,7 +382,6 @@ func waitForJobWithLogs(client kubernetes.Interface, job *batchv1.Job, timeout t
 	for time.Now().Before(deadline) {
 		j, err := client.BatchV1().Jobs(job.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
 		if err != nil {
-			stopSpinner()
 			return "", err
 		}
 
@@ -389,47 +389,74 @@ func waitForJobWithLogs(client kubernetes.Interface, job *batchv1.Job, timeout t
 			LabelSelector: fmt.Sprintf("batch.kubernetes.io/job-name=%s", job.Name),
 		})
 
-		if j.Status.Succeeded > 0 {
-			stopSpinner()
-			for _, pod := range pods.Items {
-				if logs := getPodLogs(client, pod.Namespace, pod.Name); logs != "" {
-					fmt.Printf("  pod/%s:\n\n%s\n", pod.Name, logs)
-				}
-			}
-			return "success", nil
-		}
-		if j.Status.Failed > 0 {
-			stopSpinner()
-			for _, pod := range pods.Items {
-				if logs := getPodLogs(client, pod.Namespace, pod.Name); logs != "" {
-					fmt.Printf("  pod/%s:\n\n%s\n", pod.Name, logs)
-				}
-			}
-			return fmt.Sprintf("failed (%d attempt(s))", j.Status.Failed), nil
-		}
-
-		// Show pending reason or a running spinner.
 		for _, pod := range pods.Items {
-			if pod.Status.Phase == "Pending" && !reportedPending[pod.Name] {
-				reason := pendingReason(pod)
-				if reason != "waiting for scheduler" {
+			if streamingPod == "" && pod.Status.Phase == corev1.PodRunning {
+				stopSpinner()
+				streamingPod = pod.Name
+				fmt.Printf("  pod/%s:\n\n", pod.Name)
+				go streamPodLogs(client, pod.Namespace, pod.Name)
+			}
+			if pod.Status.Phase == corev1.PodPending && !reportedPending[pod.Name] {
+				if reason := pendingReason(pod); reason != "waiting for scheduler" {
 					stopSpinner()
 					fmt.Printf("  pod/%s — %s\n", pod.Name, reason)
 					reportedPending[pod.Name] = true
 				}
 			}
-			if pod.Status.Phase == "Running" && spinner == nil {
-				spinner = NewSpinner(fmt.Sprintf("pod/%s running", pod.Name))
-			}
 		}
-		if len(pods.Items) == 0 && spinner == nil {
+		if len(pods.Items) == 0 && spinner == nil && streamingPod == "" {
 			spinner = NewSpinner("waiting for pod")
+		}
+
+		if j.Status.Succeeded > 0 {
+			stopSpinner()
+			if streamingPod == "" {
+				for _, pod := range pods.Items {
+					if logs := getPodLogs(client, pod.Namespace, pod.Name); logs != "" {
+						fmt.Printf("  pod/%s:\n\n%s\n", pod.Name, logs)
+					}
+				}
+			} else {
+				time.Sleep(500 * time.Millisecond)
+			}
+			return "success", nil
+		}
+		if j.Status.Failed > 0 {
+			stopSpinner()
+			if streamingPod == "" {
+				for _, pod := range pods.Items {
+					if logs := getPodLogs(client, pod.Namespace, pod.Name); logs != "" {
+						fmt.Printf("  pod/%s:\n\n%s\n", pod.Name, logs)
+					}
+				}
+			} else {
+				time.Sleep(500 * time.Millisecond)
+			}
+			return fmt.Sprintf("failed (%d attempt(s))", j.Status.Failed), nil
 		}
 
 		time.Sleep(3 * time.Second)
 	}
-	stopSpinner()
 	return "timeout", nil
+}
+
+func streamPodLogs(client kubernetes.Interface, namespace, podName string) {
+	req := client.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{Follow: true})
+	stream, err := req.Stream(context.Background())
+	if err != nil {
+		return
+	}
+	defer stream.Close()
+	buf := make([]byte, 4096)
+	for {
+		n, err := stream.Read(buf)
+		if n > 0 {
+			fmt.Print(string(buf[:n]))
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 func pendingReason(pod corev1.Pod) string {
