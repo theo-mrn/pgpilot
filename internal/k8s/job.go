@@ -25,7 +25,8 @@ type JobSpec struct {
 
 // buildJob creates a batchv1.Job from a JobSpec.
 func buildJob(spec JobSpec) *batchv1.Job {
-	ts := time.Now().UTC().Format("20060102-150405")
+	now := time.Now().UTC()
+	ts := fmt.Sprintf("%s-%03d", now.Format("20060102-150405"), now.UnixMilli()%1000)
 	suffix := fmt.Sprintf("-%s-%s", spec.Trigger, ts)
 	prefix := "dbpilot-" + spec.BaseName
 	if len(prefix)+len(suffix) > 63 {

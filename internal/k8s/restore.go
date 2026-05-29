@@ -62,6 +62,7 @@ echo "Done."
 		Image:     jobImage(job.DBVersion),
 		Command:   script,
 		Env:       envVars,
+		TTL:       ttl(3600),
 	})
 
 	created, err := client.BatchV1().Jobs(job.Environment.Namespace).Create(context.Background(), k8sJob, metav1.CreateOptions{})
@@ -167,6 +168,7 @@ echo "Done. Dump available at: %s"
 		Image:     WALImage,
 		Command:   script,
 		Env:       envVars,
+		TTL:       ttl(3600),
 	})
 
 	created, err := client.BatchV1().Jobs(job.Environment.Namespace).Create(context.Background(), k8sJob, metav1.CreateOptions{})
