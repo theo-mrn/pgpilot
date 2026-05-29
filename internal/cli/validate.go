@@ -3,13 +3,9 @@ package cli
 import (
 	"fmt"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 	"github.com/theomorin/dbpilot/internal/config"
 )
-
-var styleOK = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
-var styleErr = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
 
 var validateCmd = &cobra.Command{
 	Use:          "validate <name>",

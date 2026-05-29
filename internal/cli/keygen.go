@@ -6,12 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
 	agepkg "github.com/theomorin/dbpilot/internal/age"
 )
-
-var styleWarning = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
-var styleKey = lipgloss.NewStyle().Foreground(lipgloss.Color("14"))
 
 // KeyResult holds both keys after generation and confirmation.
 type KeyResult struct {

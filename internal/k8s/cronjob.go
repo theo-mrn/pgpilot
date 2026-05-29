@@ -19,7 +19,7 @@ import (
 type DeployResult struct {
 	JobName   string
 	Namespace string
-	Action    string // "created" or "updated"
+	Action    string // "created", "updated", or "dry-run"
 }
 
 // DeployBackupJobs creates or updates a CronJob for each job in cfg.
@@ -65,7 +65,7 @@ func applyNamespacedCronJob(client kubernetes.Interface, cj *batchv1.CronJob, na
 	return result, nil
 }
 
-// TriggerBackup creates a one-off Job from the CronJob for the given job name.
+// TriggerBackup creates a one-off Job from the CronJob template for the given job name.
 func TriggerBackup(kubeconfig string, cfg config.BackupConfig, jobName string) (string, error) {
 	k8scfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
@@ -87,16 +87,17 @@ func TriggerBackup(kubeconfig string, cfg config.BackupConfig, jobName string) (
 		return "", fmt.Errorf("job %q not found", jobName)
 	}
 
-	suffix := time.Now().UTC().Format("20060102-150405")
-	manualName := fmt.Sprintf("dbpilot-%s-manual-%s", job.Name, suffix)
-	if len(manualName) > 63 {
-		manualName = manualName[:63]
+	ts := time.Now().UTC().Format("20060102-150405")
+	suffix := "-manual-" + ts
+	prefix := "dbpilot-" + job.Name
+	if len(prefix)+len(suffix) > 63 {
+		prefix = prefix[:63-len(suffix)]
 	}
 
 	cj := buildCronJob(*job)
 	manualJob := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      manualName,
+			Name:      prefix + suffix,
 			Namespace: job.Environment.Namespace,
 			Labels:    cj.Labels,
 		},
@@ -112,22 +113,17 @@ func TriggerBackup(kubeconfig string, cfg config.BackupConfig, jobName string) (
 }
 
 func buildCronJob(job config.JobConfig) *batchv1.CronJob {
-	image := backupImageForJob(job)
-	jobName := "dbpilot-" + job.Name
 	successfulJobsLimit := int32(3)
 	failedJobsLimit := int32(3)
-
-	envVars, script := buildEnvVarsAndScript(job)
-
-	restartPolicy := corev1.RestartPolicyOnFailure
+	envVars, script := buildBackupEnvVarsAndScript(job)
 
 	return &batchv1.CronJob{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
+			Name:      "dbpilot-" + job.Name,
 			Namespace: job.Environment.Namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "dbpilot",
-				"dbpilot/job":                  job.Name,
+				ManagedByLabel:  ManagedByValue,
+				"dbpilot/job":   job.Name,
 			},
 		},
 		Spec: batchv1.CronJobSpec{
@@ -138,11 +134,11 @@ func buildCronJob(job config.JobConfig) *batchv1.CronJob {
 				Spec: batchv1.JobSpec{
 					Template: corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
-							RestartPolicy: restartPolicy,
+							RestartPolicy: corev1.RestartPolicyOnFailure,
 							Containers: []corev1.Container{
 								{
 									Name:            "backup",
-									Image:           image,
+									Image:           jobImage(job.DBVersion),
 									ImagePullPolicy: corev1.PullAlways,
 									Command:         []string{"/bin/sh", "-c", script},
 									Env:             envVars,
@@ -156,38 +152,11 @@ func buildCronJob(job config.JobConfig) *batchv1.CronJob {
 	}
 }
 
-// buildEnvVarsAndScript builds the env vars and shell script for a backup job.
-// Each destination gets its own AWS_* env vars (prefixed by index) and upload command.
-func buildEnvVarsAndScript(job config.JobConfig) ([]corev1.EnvVar, string) {
-	envVars := []corev1.EnvVar{
-		{
-			Name:      "PGPASSWORD",
-			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: parseSecretRef(job.Credentials.DBPassword.From)},
-		},
-	}
-	if job.Credentials.DBHost != "" {
-		envVars = append(envVars, corev1.EnvVar{Name: "PGHOST", Value: job.Credentials.DBHost})
-	}
-	if job.Credentials.DBPort != 0 {
-		envVars = append(envVars, corev1.EnvVar{Name: "PGPORT", Value: fmt.Sprintf("%d", job.Credentials.DBPort)})
-	}
-	if job.Credentials.DBUser.From != "" {
-		envVars = append(envVars, corev1.EnvVar{
-			Name:      "PGUSER",
-			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: parseSecretRef(job.Credentials.DBUser.From)},
-		})
-	}
-	if job.Credentials.DBNameValue != "" {
-		envVars = append(envVars, corev1.EnvVar{Name: "PGDATABASE", Value: job.Credentials.DBNameValue})
-	} else if job.Credentials.DBName.From != "" {
-		envVars = append(envVars, corev1.EnvVar{
-			Name:      "PGDATABASE",
-			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: parseSecretRef(job.Credentials.DBName.From)},
-		})
-	}
+// buildBackupEnvVarsAndScript builds env vars and shell script for a backup job.
+// Each destination gets prefixed AWS_* env vars and its own upload command.
+func buildBackupEnvVarsAndScript(job config.JobConfig) ([]corev1.EnvVar, string) {
+	envVars := pgEnvVars(job)
 
-	// Build per-destination env vars and upload commands.
-	// pg_dump writes to a temp file so we can upload to multiple destinations sequentially.
 	script := "set -e\nTMPFILE=$(mktemp)\ntrap 'rm -f $TMPFILE' EXIT\necho 'Dumping...'\npg_dump --no-password -Fc > $TMPFILE\necho 'Verifying dump integrity...'\npg_restore --list $TMPFILE > /dev/null\necho 'Dump verified.'\n"
 
 	for i, dest := range job.Destinations {
@@ -199,18 +168,14 @@ func buildEnvVarsAndScript(job config.JobConfig) ([]corev1.EnvVar, string) {
 		envVars = append(envVars,
 			corev1.EnvVar{
 				Name:      accessKeyVar,
-				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: parseSecretRef(dest.S3AccessKey.From)},
+				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: secretKeySelector(dest.S3AccessKey.From)},
 			},
 			corev1.EnvVar{
 				Name:      secretKeyVar,
-				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: parseSecretRef(dest.S3SecretKey.From)},
+				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: secretKeySelector(dest.S3SecretKey.From)},
 			},
+			corev1.EnvVar{Name: regionVar, Value: defaultRegion(dest.Region)},
 		)
-		region := dest.Region
-		if region == "" {
-			region = "us-east-1"
-		}
-		envVars = append(envVars, corev1.EnvVar{Name: regionVar, Value: region})
 
 		s3Key := fmt.Sprintf("s3://%s/%s/$(date -u +%%Y%%m%%dT%%H%%M%%SZ).dump.gz", dest.Bucket, dest.Prefix)
 		uploadCmd := fmt.Sprintf(
@@ -218,7 +183,7 @@ func buildEnvVarsAndScript(job config.JobConfig) ([]corev1.EnvVar, string) {
 			accessKeyVar, secretKeyVar, regionVar, s3Key,
 		)
 		if dest.Endpoint != "" {
-			uploadCmd += fmt.Sprintf(" --endpoint-url %s", dest.Endpoint)
+			uploadCmd += " --endpoint-url " + dest.Endpoint
 		}
 		script += uploadCmd + "\n"
 	}
@@ -226,48 +191,33 @@ func buildEnvVarsAndScript(job config.JobConfig) ([]corev1.EnvVar, string) {
 	return envVars, script
 }
 
-// backupImageForJob returns the backup image tag for the job's Postgres version.
-func backupImageForJob(job config.JobConfig) string {
-	version := job.DBVersion
-	if version == "" {
-		version = "16"
+// pgEnvVars returns the standard Postgres env vars for a job using SecretKeyRef where possible.
+func pgEnvVars(job config.JobConfig) []corev1.EnvVar {
+	envVars := []corev1.EnvVar{
+		{
+			Name:      "PGPASSWORD",
+			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: secretKeySelector(job.Credentials.DBPassword.From)},
+		},
 	}
-	return fmt.Sprintf("maxwellfaraday/dbpilot-backup:pg%s", version)
-}
-
-// parseSecretRef parses a secret ref of the form:
-// k8s-secret://namespace/secret-name#key
-func parseSecretRef(ref string) *corev1.SecretKeySelector {
-	ref = stripPrefix(ref, "k8s-secret://")
-	hashIdx := indexOf(ref, '#')
-	key := ""
-	if hashIdx >= 0 {
-		key = ref[hashIdx+1:]
-		ref = ref[:hashIdx]
+	if job.Credentials.DBHost != "" {
+		envVars = append(envVars, corev1.EnvVar{Name: "PGHOST", Value: job.Credentials.DBHost})
 	}
-	slashIdx := indexOf(ref, '/')
-	name := ref
-	if slashIdx >= 0 {
-		name = ref[slashIdx+1:]
+	if job.Credentials.DBPort != 0 {
+		envVars = append(envVars, corev1.EnvVar{Name: "PGPORT", Value: fmt.Sprintf("%d", job.Credentials.DBPort)})
 	}
-	return &corev1.SecretKeySelector{
-		LocalObjectReference: corev1.LocalObjectReference{Name: name},
-		Key:                  key,
+	if job.Credentials.DBUser.From != "" {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:      "PGUSER",
+			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: secretKeySelector(job.Credentials.DBUser.From)},
+		})
 	}
-}
-
-func stripPrefix(s, prefix string) string {
-	if len(s) >= len(prefix) && s[:len(prefix)] == prefix {
-		return s[len(prefix):]
+	if job.Credentials.DBNameValue != "" {
+		envVars = append(envVars, corev1.EnvVar{Name: "PGDATABASE", Value: job.Credentials.DBNameValue})
+	} else if job.Credentials.DBName.From != "" {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:      "PGDATABASE",
+			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: secretKeySelector(job.Credentials.DBName.From)},
+		})
 	}
-	return s
-}
-
-func indexOf(s string, c byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == c {
-			return i
-		}
-	}
-	return -1
+	return envVars
 }

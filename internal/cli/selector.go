@@ -5,15 +5,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/theomorin/dbpilot/internal/detect"
-)
-
-var (
-	styleSelected    = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
-	styleUnsupported = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleCursor      = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
-	styleSubtext     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
 
 type selectorModel struct {

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -213,44 +211,14 @@ func storeS3CredentialsNamed(kubeconfig, namespace, secretName, accessKey, secre
 	if err != nil {
 		return err
 	}
-
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: namespace,
-			Labels:    map[string]string{"app.kubernetes.io/managed-by": "dbpilot"},
-		},
-		StringData: map[string]string{
-			"access_key": accessKey,
-			"secret_key": secretKey,
-		},
-	}
-
-	_, err = client.CoreV1().Secrets(namespace).Create(context.Background(), secret, metav1.CreateOptions{})
-	if errors.IsAlreadyExists(err) {
-		_, err = client.CoreV1().Secrets(namespace).Update(context.Background(), secret, metav1.UpdateOptions{})
-	}
-	return err
+	return upsertSecret(client, managedSecret(namespace, secretName, map[string]string{
+		"access_key": accessKey,
+		"secret_key": secretKey,
+	}))
 }
 
 // ReadSecret reads a key from a K8s secret using a k8s-secret:// ref string.
 func ReadSecret(kubeconfig, ref string) (string, error) {
-	// ref format: k8s-secret://namespace/name#key
-	ref = stripPrefix(ref, "k8s-secret://")
-	hashIdx := indexOf(ref, '#')
-	key := ""
-	if hashIdx >= 0 {
-		key = ref[hashIdx+1:]
-		ref = ref[:hashIdx]
-	}
-	slashIdx := indexOf(ref, '/')
-	namespace := "default"
-	name := ref
-	if slashIdx >= 0 {
-		namespace = ref[:slashIdx]
-		name = ref[slashIdx+1:]
-	}
-
 	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		return "", err
@@ -259,15 +227,7 @@ func ReadSecret(kubeconfig, ref string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	secret, err := client.CoreV1().Secrets(namespace).Get(context.Background(), name, metav1.GetOptions{})
-	if err != nil {
-		return "", fmt.Errorf("reading secret %s/%s: %w", namespace, name, err)
-	}
-	val, ok := secret.Data[key]
-	if !ok {
-		return "", fmt.Errorf("key %q not found in secret %s/%s", key, namespace, name)
-	}
-	return string(val), nil
+	return readSecret(client, ref)
 }
 
 // StoreAgePrivateKey stores the age private key in a Secret in the dbpilot namespace.
@@ -284,21 +244,7 @@ func storeAgePrivateKeyInNamespace(kubeconfig, namespace, privateKey string) err
 	if err != nil {
 		return err
 	}
-
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "dbpilot-age-key",
-			Namespace: namespace,
-			Labels:    map[string]string{"app.kubernetes.io/managed-by": "dbpilot"},
-		},
-		StringData: map[string]string{
-			"private_key": privateKey,
-		},
-	}
-
-	_, err = client.CoreV1().Secrets(namespace).Create(context.Background(), secret, metav1.CreateOptions{})
-	if errors.IsAlreadyExists(err) {
-		_, err = client.CoreV1().Secrets(namespace).Update(context.Background(), secret, metav1.UpdateOptions{})
-	}
-	return err
+	return upsertSecret(client, managedSecret(namespace, "dbpilot-age-key", map[string]string{
+		"private_key": privateKey,
+	}))
 }
