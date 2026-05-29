@@ -368,16 +368,29 @@ func triggerNow(client kubernetes.Interface, cj batchv1.CronJob) (*batchv1.Job, 
 func waitForJobWithLogs(client kubernetes.Interface, job *batchv1.Job, timeout time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 	reportedPending := make(map[string]bool)
+	var spinner *Spinner
+
+	stopSpinner := func() {
+		if spinner != nil {
+			spinner.Stop()
+			spinner = nil
+		}
+	}
+	defer stopSpinner()
 
 	for time.Now().Before(deadline) {
 		j, err := client.BatchV1().Jobs(job.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
 		if err != nil {
+			stopSpinner()
 			return "", err
 		}
+
+		pods, _ := client.CoreV1().Pods(job.Namespace).List(context.Background(), metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("batch.kubernetes.io/job-name=%s", job.Name),
+		})
+
 		if j.Status.Succeeded > 0 {
-			pods, _ := client.CoreV1().Pods(job.Namespace).List(context.Background(), metav1.ListOptions{
-				LabelSelector: fmt.Sprintf("batch.kubernetes.io/job-name=%s", job.Name),
-			})
+			stopSpinner()
 			for _, pod := range pods.Items {
 				if logs := getPodLogs(client, pod.Namespace, pod.Name); logs != "" {
 					fmt.Printf("  pod/%s:\n\n%s\n", pod.Name, logs)
@@ -386,9 +399,7 @@ func waitForJobWithLogs(client kubernetes.Interface, job *batchv1.Job, timeout t
 			return "success", nil
 		}
 		if j.Status.Failed > 0 {
-			pods, _ := client.CoreV1().Pods(job.Namespace).List(context.Background(), metav1.ListOptions{
-				LabelSelector: fmt.Sprintf("batch.kubernetes.io/job-name=%s", job.Name),
-			})
+			stopSpinner()
 			for _, pod := range pods.Items {
 				if logs := getPodLogs(client, pod.Namespace, pod.Name); logs != "" {
 					fmt.Printf("  pod/%s:\n\n%s\n", pod.Name, logs)
@@ -397,19 +408,27 @@ func waitForJobWithLogs(client kubernetes.Interface, job *batchv1.Job, timeout t
 			return fmt.Sprintf("failed (%d attempt(s))", j.Status.Failed), nil
 		}
 
-		pods, _ := client.CoreV1().Pods(job.Namespace).List(context.Background(), metav1.ListOptions{
-			LabelSelector: fmt.Sprintf("batch.kubernetes.io/job-name=%s", job.Name),
-		})
+		// Show pending reason or a running spinner.
 		for _, pod := range pods.Items {
 			if pod.Status.Phase == "Pending" && !reportedPending[pod.Name] {
-				if reason := pendingReason(pod); reason != "waiting for scheduler" {
+				reason := pendingReason(pod)
+				if reason != "waiting for scheduler" {
+					stopSpinner()
 					fmt.Printf("  pod/%s — %s\n", pod.Name, reason)
 					reportedPending[pod.Name] = true
 				}
 			}
+			if pod.Status.Phase == "Running" && spinner == nil {
+				spinner = NewSpinner(fmt.Sprintf("pod/%s running", pod.Name))
+			}
 		}
+		if len(pods.Items) == 0 && spinner == nil {
+			spinner = NewSpinner("waiting for pod")
+		}
+
 		time.Sleep(3 * time.Second)
 	}
+	stopSpinner()
 	return "timeout", nil
 }
 
