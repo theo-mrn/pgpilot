@@ -34,6 +34,15 @@ func Load(path string) (BackupConfig, error) {
 	return cfg, nil
 }
 
+// Save writes cfg to path as YAML.
+func Save(path string, cfg BackupConfig) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshalling config: %w", err)
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
 // Validate checks that cfg is complete and consistent.
 // Returns all errors found, not just the first.
 func Validate(cfg BackupConfig) []ValidationError {

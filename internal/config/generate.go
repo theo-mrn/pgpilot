@@ -46,9 +46,12 @@ func Generate(instances []detect.DetectedInstance, agePublicKey string, dest Des
 					S3SecretKey: SecretRef{From: s3SecretKey},
 				},
 			},
+			PITR: PITRConfig{
+				IsCNPG: inst.IsCNPG,
+			},
 			Credentials: CredentialsConfig{
 				DBPassword:   SecretRef{From: fmt.Sprintf("k8s-secret://%s/dbpilot-credentials#db_password", inst.Namespace)},
-				DBHost:       jobName(inst),
+				DBHost:       dbHost(inst),
 				AgePublicKey: agePublicKey,
 			},
 		}
@@ -102,6 +105,15 @@ func Write(cfg BackupConfig, path string, force bool) error {
 		"# Secrets must reference your secret backend, never be written in plain text.\n\n"
 
 	return os.WriteFile(path, append([]byte(header), data...), 0644)
+}
+
+// dbHost returns the K8s service name to use as db_host.
+// For CNPG clusters, use the -rw service. For vanilla, use the pod-derived name.
+func dbHost(inst detect.DetectedInstance) string {
+	if inst.ServiceName != "" {
+		return inst.ServiceName
+	}
+	return jobName(inst)
 }
 
 // jobName builds a stable, readable job name from the instance.

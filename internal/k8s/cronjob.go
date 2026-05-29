@@ -177,7 +177,9 @@ func buildEnvVarsAndScript(job config.JobConfig) ([]corev1.EnvVar, string) {
 			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: parseSecretRef(job.Credentials.DBUser.From)},
 		})
 	}
-	if job.Credentials.DBName.From != "" {
+	if job.Credentials.DBNameValue != "" {
+		envVars = append(envVars, corev1.EnvVar{Name: "PGDATABASE", Value: job.Credentials.DBNameValue})
+	} else if job.Credentials.DBName.From != "" {
 		envVars = append(envVars, corev1.EnvVar{
 			Name:      "PGDATABASE",
 			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: parseSecretRef(job.Credentials.DBName.From)},

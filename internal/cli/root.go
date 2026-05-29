@@ -38,6 +38,7 @@ func init() {
 	rootCmd.AddCommand(deployCmd)
 	rootCmd.AddCommand(validateCmd)
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(pitrCmd)
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "version",
 		Short: "Print version",

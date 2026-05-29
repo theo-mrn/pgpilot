@@ -96,7 +96,7 @@ func ScanKubernetes(kubeconfig string, verbose bool) ([]DetectedInstance, error)
 			if confidence == ConfidenceLow && !verbose {
 				continue
 			}
-			instances = append(instances, DetectedInstance{
+			inst := DetectedInstance{
 				Environment:      EnvKubernetes,
 				Engine:           engine,
 				EngineVersion:    extractVersion(container.Image),
@@ -107,7 +107,13 @@ func ScanKubernetes(kubeconfig string, verbose bool) ([]DetectedInstance, error)
 				DetectionSignals: signals,
 				Score:            score,
 				Confidence:       confidence,
-			})
+			}
+			// CNPG clusters expose a -rw service for read-write connections.
+			if clusterName, ok := pod.Labels["cnpg.io/cluster"]; ok {
+				inst.IsCNPG = true
+				inst.ServiceName = clusterName + "-rw"
+			}
+			instances = append(instances, inst)
 		}
 	}
 	return instances, nil

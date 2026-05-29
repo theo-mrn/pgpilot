@@ -27,9 +27,12 @@ func newRestoreNameCmd(cfgName string) *cobra.Command {
 		Short: fmt.Sprintf("Restore commands for config %q", cfgName),
 	}
 
+	home, _ := os.UserHomeDir()
+	defaultKube := filepath.Join(home, ".kube", "config")
+
 	runCmd := &cobra.Command{
 		Use:          "run [job-name]",
-		Short:        "Restore a database from a backup",
+		Short:        "Restore a database from a snapshot backup",
 		SilenceUsage: true,
 		RunE: func(c *cobra.Command, args []string) error {
 			kubeconfig, _ := c.Flags().GetString("kubeconfig")
@@ -40,10 +43,28 @@ func newRestoreNameCmd(cfgName string) *cobra.Command {
 			return runRestoreRun(cfgName, jobName, kubeconfig)
 		},
 	}
-	home, _ := os.UserHomeDir()
-	runCmd.Flags().String("kubeconfig", filepath.Join(home, ".kube", "config"), "path to kubeconfig file")
+	runCmd.Flags().String("kubeconfig", defaultKube, "path to kubeconfig file")
+
+	pitrCmd := &cobra.Command{
+		Use:          "pitr [job-name]",
+		Short:        "Restore to a point in time using WAL replay",
+		SilenceUsage: true,
+		RunE: func(c *cobra.Command, args []string) error {
+			kubeconfig, _ := c.Flags().GetString("kubeconfig")
+			targetTime, _ := c.Flags().GetString("target-time")
+			jobName := ""
+			if len(args) > 0 {
+				jobName = args[0]
+			}
+			return runRestorePITR(cfgName, jobName, targetTime, kubeconfig)
+		},
+	}
+	pitrCmd.Flags().String("kubeconfig", defaultKube, "path to kubeconfig file")
+	pitrCmd.Flags().String("target-time", "", "RFC3339 timestamp to recover to (e.g. 2024-01-15T14:30:00Z)")
+	_ = pitrCmd.MarkFlagRequired("target-time")
 
 	cmd.AddCommand(runCmd)
+	cmd.AddCommand(pitrCmd)
 	return cmd
 }
 
@@ -168,6 +189,80 @@ func restoreJob(job config.JobConfig, cfgName, kubeconfig string) error {
 		fmt.Printf("%s  Restore complete.\n", styleOK.Render("✓"))
 	} else {
 		fmt.Printf("%s  Restore %s\n", styleErr.Render("✗"), status)
+	}
+	return nil
+}
+
+func runRestorePITR(cfgName, jobName, targetTime, kubeconfig string) error {
+	cfgPath, err := config.NamedPath(cfgName)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+
+	var job *config.JobConfig
+	if jobName != "" {
+		for i := range cfg.Jobs {
+			if cfg.Jobs[i].Name == jobName {
+				job = &cfg.Jobs[i]
+				break
+			}
+		}
+		if job == nil {
+			return fmt.Errorf("job %q not found in config %q", jobName, cfgName)
+		}
+	} else {
+		// Pick the first PITR-enabled job or ask
+		for i := range cfg.Jobs {
+			if cfg.Jobs[i].PITR.Enabled {
+				job = &cfg.Jobs[i]
+				break
+			}
+		}
+		if job == nil {
+			return fmt.Errorf("no PITR-enabled job found — run `dbpilot pitr enable %s` first", cfgName)
+		}
+	}
+
+	if !job.PITR.Enabled {
+		return fmt.Errorf("PITR is not enabled for job %q — run `dbpilot pitr enable %s %s` first", job.Name, cfgName, job.Name)
+	}
+
+	fmt.Printf("PITR restore for job %q to %s\n", job.Name, targetTime)
+	fmt.Print(styleErr.Render("  ⚠  This will overwrite the current database. Continue? [y/N] "))
+	var ans string
+	fmt.Scanln(&ans)
+	if strings.ToLower(ans) != "y" {
+		fmt.Println("  Skipped.")
+		return nil
+	}
+
+	k8sJob, err := k8s.TriggerPITRRestore(kubeconfig, *job, targetTime)
+	if err != nil {
+		return fmt.Errorf("triggering PITR restore: %w", err)
+	}
+	fmt.Printf("  %s  PITR restore job started: job/%s\n\n", styleOK.Render("▶"), k8sJob.Name)
+
+	k8scfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		return err
+	}
+	client, err := kubernetes.NewForConfig(k8scfg)
+	if err != nil {
+		return err
+	}
+
+	status, err := waitForJobWithLogs(client, k8sJob, 60*60*1e9)
+	if err != nil {
+		return err
+	}
+	if status == "success" {
+		fmt.Printf("%s  PITR restore complete.\n", styleOK.Render("✓"))
+	} else {
+		fmt.Printf("%s  PITR restore %s\n", styleErr.Render("✗"), status)
 	}
 	return nil
 }

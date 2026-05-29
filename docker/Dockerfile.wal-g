@@ -8,11 +8,14 @@ ARG WALG_VERSION
 ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates postgresql-client \
-    && curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/$(dpkg --print-architecture)/kubectl" \
-       -o /usr/local/bin/kubectl \
-    && chmod +x /usr/local/bin/kubectl \
+    curl ca-certificates postgresql-client postgresql unzip \
     && rm -rf /var/lib/apt/lists/*
+
+RUN ARCH=$([ "$(uname -m)" = "aarch64" ] && echo "aarch64" || echo "x86_64") && \
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${ARCH}.zip" -o /tmp/awscliv2.zip && \
+    unzip -q /tmp/awscliv2.zip -d /tmp && \
+    /tmp/aws/install && \
+    rm -rf /tmp/awscliv2.zip /tmp/aws
 
 RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "amd64") && \
     curl -fsSL \
@@ -21,4 +24,7 @@ RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "amd64") && \
     chmod +x /usr/local/bin/wal-g && \
     wal-g --version
 
-ENTRYPOINT ["wal-g"]
+COPY docker/wal-stream.sh /usr/local/bin/wal-stream.sh
+RUN chmod +x /usr/local/bin/wal-stream.sh
+
+ENTRYPOINT ["/usr/local/bin/wal-stream.sh"]

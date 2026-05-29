@@ -37,9 +37,11 @@ type DetectedInstance struct {
 	Engine       DatabaseEngine
 	EngineVersion string // e.g. "16", "15"
 	// Kubernetes-specific
-	Namespace string
-	PodName   string
-	Container string
+	Namespace   string
+	PodName     string
+	Container   string
+	ServiceName string // K8s service to connect to (e.g. times-postgres-rw for CNPG)
+	IsCNPG      bool   // true if managed by CloudNativePG
 	// Human-readable identifier
 	DisplayName string
 	// Signals used to identify the engine (e.g. image name, env vars)

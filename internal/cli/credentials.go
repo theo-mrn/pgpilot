@@ -39,7 +39,12 @@ func ResolveDBCredentials(kubeconfig string, instances []detect.DetectedInstance
 
 		resolved.Password = resolveRef(reader, "password", creds.Password)
 		resolved.User = resolveRef(reader, "user    ", creds.User)
-		resolved.Name = resolveRef(reader, "db_name ", creds.Name)
+		if creds.DBName != "" {
+			fmt.Printf("    %s  db_name : %s\n", styleOK.Render("✓"), creds.DBName)
+			resolved.Name = creds.DBName
+		} else {
+			resolved.Name = resolveRef(reader, "db_name ", creds.Name)
+		}
 
 		result[jobName] = resolved
 		fmt.Println()
@@ -78,7 +83,11 @@ func ApplyDBCredentials(cfg *config.BackupConfig, credRefs map[string]ResolvedJo
 				cfg.Jobs[i].Credentials.DBUser = config.SecretRef{From: resolved.User}
 			}
 			if resolved.Name != "" {
-				cfg.Jobs[i].Credentials.DBName = config.SecretRef{From: resolved.Name}
+				if strings.HasPrefix(resolved.Name, "k8s-secret://") {
+					cfg.Jobs[i].Credentials.DBName = config.SecretRef{From: resolved.Name}
+				} else {
+					cfg.Jobs[i].Credentials.DBNameValue = resolved.Name
+				}
 			}
 		}
 	}

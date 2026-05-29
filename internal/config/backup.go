@@ -20,8 +20,14 @@ type JobConfig struct {
 	Schedule     string              `yaml:"schedule"`
 	Retention    string              `yaml:"retention"`
 	Encrypt      bool                `yaml:"encrypt"`
+	PITR         PITRConfig          `yaml:"pitr,omitempty"`
 	Destinations []DestinationConfig `yaml:"destinations"`
 	Credentials  CredentialsConfig   `yaml:"credentials"`
+}
+
+type PITRConfig struct {
+	Enabled bool `yaml:"enabled"`
+	IsCNPG  bool `yaml:"is_cnpg,omitempty"`
 }
 
 type EnvironmentConfig struct {
@@ -45,6 +51,7 @@ type CredentialsConfig struct {
 	DBPassword   SecretRef `yaml:"db_password"`
 	DBUser       SecretRef `yaml:"db_user,omitempty"`
 	DBName       SecretRef `yaml:"db_name,omitempty"`
+	DBNameValue  string    `yaml:"db_name_value,omitempty"` // plain value when not stored in a secret
 	DBHost       string    `yaml:"db_host,omitempty"`
 	DBPort       int       `yaml:"db_port,omitempty"`
 	AgePublicKey string    `yaml:"age_public_key,omitempty"`
