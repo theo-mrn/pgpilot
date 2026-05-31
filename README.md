@@ -4,6 +4,8 @@ Automated PostgreSQL backups for Kubernetes. No infrastructure changes required.
 
 pgpilot deploys a CronJob per database that runs `pg_dump` and uploads the result to S3-compatible storage. It connects to Postgres over the network — no sidecar, no pod modification, no GitOps conflicts.
 
+Point-in-time recovery (PITR) via continuous WAL streaming with WAL-G is also supported.
+
 ---
 
 ## Install
@@ -37,15 +39,97 @@ chmod +x /usr/local/bin/dbpilot
 
 ## Quickstart
 
-### 1. Detect your databases
+### 1. Create a config
 
 ```bash
-dbpilot detect
+dbpilot config create myapp
 ```
 
-Scans your cluster for running Postgres instances and generates `~/.config/dbpilot/backup.yaml`.
+This opens an interactive setup to configure your database and S3 destination. The config is saved to `~/.config/dbpilot/myapp.yaml`.
 
-### 2. Edit the config
+### 2. Validate the config
+
+```bash
+dbpilot validate myapp
+```
+
+### 3. Deploy
+
+```bash
+dbpilot deploy myapp
+```
+
+Creates a CronJob in each namespace. That's it.
+
+### 4. Run a manual backup
+
+```bash
+dbpilot backup myapp run
+```
+
+Triggers a backup and streams the pod logs until completion.
+
+### 5. Restore
+
+```bash
+dbpilot restore myapp run
+```
+
+Lists available backups in S3 and lets you pick one to restore interactively.
+
+---
+
+## Commands
+
+### Backup
+
+| Command | Description |
+|---|---|
+| `dbpilot backup <name> run [job-name]` | Trigger a backup now and wait for result |
+| `dbpilot backup <name> run --no-wait` | Trigger and return immediately |
+| `dbpilot backup <name> run --dry-run` | Show what would be triggered |
+| `dbpilot backup <name> list [job-name]` | List available backups in S3 |
+
+### Restore
+
+| Command | Description |
+|---|---|
+| `dbpilot restore <name> run [job-name]` | Restore from a snapshot backup (interactive) |
+| `dbpilot restore <name> pitr [job-name] --target-time <RFC3339>` | Restore to a point in time via WAL replay |
+
+### PITR (Point-in-Time Recovery)
+
+| Command | Description |
+|---|---|
+| `dbpilot pitr enable <name> [job-name]` | Enable continuous WAL streaming |
+| `dbpilot pitr disable <name>` | Disable WAL streaming and remove agents |
+| `dbpilot pitr basebackup <name> [job-name]` | Take a WAL-G base backup |
+| `dbpilot pitr status <name>` | Show WAL agent status |
+
+### Config
+
+| Command | Description |
+|---|---|
+| `dbpilot config create <name>` | Create a new backup config interactively |
+| `dbpilot config <name> list` | List jobs in a config |
+| `dbpilot config <name> edit` | Open config in `$EDITOR` |
+| `dbpilot config <name> delete` | Delete a config |
+| `dbpilot config <name> storage` | Reconfigure S3 storage |
+
+### Other
+
+| Command | Description |
+|---|---|
+| `dbpilot deploy <name>` | Deploy CronJobs to Kubernetes |
+| `dbpilot validate <name>` | Validate a backup configuration |
+| `dbpilot status [name]` | Show status of deployed CronJobs |
+| `dbpilot version` | Print version |
+
+---
+
+## Config format
+
+Configs live in `~/.config/dbpilot/<name>.yaml`:
 
 ```yaml
 jobs:
@@ -56,37 +140,33 @@ jobs:
       namespace: myapp
     schedule: "0 2 * * *"   # daily at 02:00
     retention: 7d
-    destination:
-      type: s3
-      bucket: my-backups
-      endpoint: https://minio.example.com   # omit for AWS S3
-      prefix: myapp/postgres
+    destinations:
+      - type: s3
+        bucket: my-backups
+        endpoint: https://minio.example.com   # omit for AWS S3
+        prefix: myapp/postgres
+        s3_access_key:
+          from: k8s-secret://myapp/s3-credentials#access_key
+        s3_secret_key:
+          from: k8s-secret://myapp/s3-credentials#secret_key
     credentials:
-      db_host: postgres          # Kubernetes service name
+      db_host: postgres
       db_password:
         from: k8s-secret://myapp/myapp-env#DB_PASSWORD
       db_user:
         from: k8s-secret://myapp/myapp-env#DB_USER
       db_name:
         from: k8s-secret://myapp/myapp-env#DB_NAME
-      s3_access_key:
-        from: k8s-secret://myapp/s3-credentials#access_key
-      s3_secret_key:
-        from: k8s-secret://myapp/s3-credentials#secret_key
 ```
 
-### 3. Deploy
+---
 
-```bash
-dbpilot deploy
+## Secret references
+
+Credentials are never stored in plain text. They reference existing Kubernetes Secrets:
+
 ```
-
-Creates a CronJob in each namespace. That's it.
-
-### 4. Run a manual backup
-
-```bash
-dbpilot backup --wait
+k8s-secret://<namespace>/<secret-name>#<key>
 ```
 
 ---
@@ -101,51 +181,4 @@ pg_dump -Fc | aws s3 cp - s3://bucket/prefix/20240115T020000Z.dump.gz
 
 Backups are named by timestamp and stored in custom format (`.dump.gz`), restorable with `pg_restore`.
 
----
-
-## Commands
-
-| Command | Description |
-|---|---|
-| `dbpilot detect` | Scan the cluster and generate `backup.yaml` |
-| `dbpilot deploy` | Deploy CronJobs to Kubernetes |
-| `dbpilot backup` | Trigger a manual backup |
-| `dbpilot backup --wait` | Trigger and wait for result |
-| `dbpilot validate` | Validate `backup.yaml` |
-| `dbpilot status` | Show status of deployed jobs |
-| `dbpilot version` | Print version |
-
----
-
-## Secret references
-
-Credentials are never stored in plain text. They reference existing Kubernetes Secrets:
-
-```
-k8s-secret://<namespace>/<secret-name>#<key>
-```
-
-Example: `k8s-secret://myapp/myapp-env#DB_PASSWORD`
-
----
-
-## Supported Postgres versions
-
-| Version | Docker image |
-|---|---|
-| 14 | `maxwellfaraday/dbpilot-backup:pg14` |
-| 15 | `maxwellfaraday/dbpilot-backup:pg15` |
-| 16 | `maxwellfaraday/dbpilot-backup:pg16` |
-| 17 | `maxwellfaraday/dbpilot-backup:pg17` |
-
----
-
-## Restore
-
-```bash
-# Download the backup
-aws s3 cp s3://my-backups/myapp/postgres/20240115T020000Z.dump.gz ./backup.dump.gz
-
-# Restore
-pg_restore -h <host> -U <user> -d <database> ./backup.dump.gz
-```
+For PITR, a WAL streaming agent (WAL-G) is deployed as a Deployment alongside the database pod and continuously ships WAL segments to S3.
